@@ -1,0 +1,68 @@
+sequenceDiagram
+    participant User
+    participant AMM_Program as Raydium AMM Program
+    participant SPL_Token_Program as SPL Token Program
+    participant OpenBook_DEX_Program as OpenBook DEX Program
+    participant Amm_Info_Account as AMM Info Account (Existing)
+    participant User_Base_Token_Account as User Base Token Account
+    participant User_Quote_Token_Account as User Quote Token Account
+    participant User_LP_Token_Account as User LP Token Account
+    participant Base_Token_Vault as Base Token Vault (Existing)
+    participant Quote_Token_Vault as Quote Token Vault (Existing)
+    participant LP_Token_Mint as LP Token Mint (Existing)
+    participant OpenOrders_Account as OpenOrders Account (Existing)
+    participant TargetOrders_Account as TargetOrders Account (Existing)
+    participant Clock_Sysvar as Clock Sysvar
+
+    User->>AMM_Program: Calls Deposit instruction (pool ID, max_coin_amount, max_pc_amount, base_side)
+    activate AMM_Program
+
+    AMM_Program->>Amm_Info_Account: Load AMM pool state (status, reserves, lp_supply, fees, etc.)
+    AMM_Program->>OpenOrders_Account: Load OpenOrders state (for effective reserve calculation)
+    AMM_Program->>TargetOrders_Account: Load TargetOrders state (calc_pnl_x/y)
+    AMM_Program->>Base_Token_Vault: Read current base token vault balance
+    AMM_Program->>Quote_Token_Vault: Read current quote token vault balance
+    AMM_Program->>LP_Token_Mint: Read current LP token supply
+
+    %% PnL Calculation (Simplified)
+    AMM_Program->>AMM_Program: Calculate effective pool reserves (vaults + OpenBook orders)
+    AMM_Program->>AMM_Program: Calculate and account for pending PnL (updates AmmInfo.state_data, TargetOrders.calc_pnl_x/y)
+
+    %% Determine Deposit Amounts & LP to Mint
+    AMM_Program->>AMM_Program: Calculate actual deposit amounts for base & quote tokens based on pool ratio and user's max inputs
+    AMM_Program->>AMM_Program: Calculate LP tokens to mint
+
+    %% Token Transfers from User to Vaults
+    AMM_Program->>SPL_Token_Program: Transfer Base Tokens from User_Base_Token_Account to Base_Token_Vault
+    activate SPL_Token_Program
+    SPL_Token_Program-->>User_Base_Token_Account: Debit Base Tokens
+    SPL_Token_Program-->>Base_Token_Vault: Credit Base Tokens
+    deactivate SPL_Token_Program
+
+    AMM_Program->>SPL_Token_Program: Transfer Quote Tokens from User_Quote_Token_Account to Quote_Token_Vault
+    activate SPL_Token_Program
+    SPL_Token_Program-->>User_Quote_Token_Account: Debit Quote Tokens
+    SPL_Token_Program-->>Quote_Token_Vault: Credit Quote Tokens
+    deactivate SPL_Token_Program
+
+    %% Mint LP Tokens to User
+    AMM_Program->>SPL_Token_Program: Mint LP Tokens to User_LP_Token_Account
+    activate SPL_Token_Program
+    SPL_Token_Program-->>LP_Token_Mint: Debit (Mint from supply) LP Tokens
+    SPL_Token_Program-->>User_LP_Token_Account: Credit LP Tokens
+    deactivate SPL_Token_Program
+
+    %% Update AMM State
+    AMM_Program->>Amm_Info_Account: Update total LP supply (lp_amount)
+    AMM_Program->>TargetOrders_Account: Update calc_pnl_x, calc_pnl_y with new liquidity
+    AMM_Program->>Clock_Sysvar: Read current epoch
+    AMM_Program->>Amm_Info_Account: Update recent_epoch
+
+    %% Optional: If AMM strategy involves immediate rebalancing or placing new orders on OpenBook
+    alt AMM places/updates orders on OpenBook
+        AMM_Program->>OpenBook_DEX_Program: (Potentially) Cancel existing orders
+        AMM_Program->>OpenBook_DEX_Program: (Potentially) Place new/updated orders based on new liquidity
+    end
+
+    AMM_Program-->>User: Liquidity Deposited Successfully, LP Tokens Received
+    deactivate AMM_Program

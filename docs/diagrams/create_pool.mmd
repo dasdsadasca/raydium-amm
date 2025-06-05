@@ -1,0 +1,99 @@
+sequenceDiagram
+    participant User
+    participant AMM_Program as Raydium AMM Program
+    participant System_Program as System Program
+    participant SPL_Token_Program as SPL Token Program
+    participant Rent_Sysvar as Rent Sysvar
+    participant OpenBook_DEX_Program as OpenBook DEX Program
+    participant Amm_Info_Account as AMM Info Account (New)
+    participant LP_Token_Mint as LP Token Mint (New)
+    participant Base_Token_Vault as Base Token Vault (New)
+    participant Quote_Token_Vault as Quote Token Vault (New)
+    participant OpenOrders_Account as OpenOrders Account (New)
+    participant TargetOrders_Account as TargetOrders Account (New)
+    participant Amm_Config_Account as AMM Config Account (Existing)
+    participant User_Base_Token_Account as User Base Token Account
+    participant User_Quote_Token_Account as User Quote Token Account
+    participant User_LP_Token_Account as User LP Token Account (New)
+
+    User->>AMM_Program: Calls Initialize2 instruction (with initial liquidity, token mints, OpenBook market ID)
+    activate AMM_Program
+
+    AMM_Program->>Amm_Config_Account: Reads pool creation fee
+    AMM_Program->>User: Charges pool creation fee (if any, via System Program)
+
+    %% Account Creations
+    AMM_Program->>System_Program: Create AMM Info Account
+    activate System_Program
+    System_Program-->>Amm_Info_Account: Account created
+    deactivate System_Program
+    AMM_Program->>Amm_Info_Account: Initialize AMM Info (status, nonce, decimals, fees, etc.)
+
+    AMM_Program->>System_Program: Create TargetOrders Account
+    activate System_Program
+    System_Program-->>TargetOrders_Account: Account created
+    deactivate System_Program
+    AMM_Program->>TargetOrders_Account: Initialize TargetOrders (calc_pnl_x/y based on initial liquidity)
+
+    AMM_Program->>System_Program: Create LP Token Mint Account
+    activate System_Program
+    System_Program-->>LP_Token_Mint: Account created
+    deactivate System_Program
+    AMM_Program->>SPL_Token_Program: Initialize LP Token Mint (decimals, mint authority = AMM PDA)
+    activate SPL_Token_Program
+    SPL_Token_Program-->>LP_Token_Mint: Mint Initialized
+    deactivate SPL_Token_Program
+
+    AMM_Program->>System_Program: Create Base Token Vault Account (owned by AMM PDA)
+    activate System_Program
+    System_Program-->>Base_Token_Vault: Account created
+    deactivate System_Program
+    AMM_Program->>SPL_Token_Program: Initialize Base Token Vault
+    activate SPL_Token_Program
+    SPL_Token_Program-->>Base_Token_Vault: Vault Initialized
+    deactivate SPL_Token_Program
+
+    AMM_Program->>System_Program: Create Quote Token Vault Account (owned by AMM PDA)
+    activate System_Program
+    System_Program-->>Quote_Token_Vault: Account created
+    deactivate System_Program
+    AMM_Program->>SPL_Token_Program: Initialize Quote Token Vault
+    activate SPL_Token_Program
+    SPL_Token_Program-->>Quote_Token_Vault: Vault Initialized
+    deactivate SPL_Token_Program
+
+    AMM_Program->>System_Program: Create OpenOrders Account (for OpenBook DEX)
+    activate System_Program
+    System_Program-->>OpenOrders_Account: Account created
+    deactivate System_Program
+    AMM_Program->>OpenBook_DEX_Program: Initialize OpenOrders Account (market, owner = AMM PDA)
+    activate OpenBook_DEX_Program
+    OpenBook_DEX_Program-->>OpenOrders_Account: OpenOrders Initialized
+    deactivate OpenBook_DEX_Program
+
+    %% Initial Liquidity Transfer
+    AMM_Program->>SPL_Token_Program: Transfer Base Tokens from User to Base Token Vault
+    activate SPL_Token_Program
+    SPL_Token_Program-->>User_Base_Token_Account: Debit Base Tokens
+    SPL_Token_Program-->>Base_Token_Vault: Credit Base Tokens
+    deactivate SPL_Token_Program
+
+    AMM_Program->>SPL_Token_Program: Transfer Quote Tokens from User to Quote Token Vault
+    activate SPL_Token_Program
+    SPL_Token_Program-->>User_Quote_Token_Account: Debit Quote Tokens
+    SPL_Token_Program-->>Quote_Token_Vault: Credit Quote Tokens
+    deactivate SPL_Token_Program
+
+    %% Create User's LP ATA (simplified, could be separate instruction by user)
+    AMM_Program->>System_Program: (If needed) Create User LP ATA
+    AMM_Program->>SPL_Token_Program: (If needed) Initialize User LP ATA
+
+    %% Mint LP Tokens to User
+    AMM_Program->>SPL_Token_Program: Mint LP Tokens to User LP Token Account
+    activate SPL_Token_Program
+    SPL_Token_Program-->>LP_Token_Mint: Debit (Mint) LP Tokens
+    SPL_Token_Program-->>User_LP_Token_Account: Credit LP Tokens
+    deactivate SPL_Token_Program
+
+    AMM_Program-->>User: Pool Created Successfully
+    deactivate AMM_Program

@@ -1,0 +1,80 @@
+sequenceDiagram
+    participant User
+    participant AMM_Program as Raydium AMM Program
+    participant SPL_Token_Program as SPL Token Program
+    participant OpenBook_DEX_Program as OpenBook DEX Program
+    participant Amm_Info_Account as AMM Info Account (Existing)
+    participant User_Source_Token_Account as User Source Token Account
+    participant User_Destination_Token_Account as User Destination Token Account
+    participant Base_Token_Vault as Base Token Vault (Existing)
+    participant Quote_Token_Vault as Quote Token Vault (Existing)
+    participant OpenOrders_Account as OpenOrders Account (Existing)
+    participant TargetOrders_Account as TargetOrders Account (Existing)
+    participant OB_Market_Accounts as OpenBook Market (Bids, Asks, EventQ, ReqQ, Market Vaults)
+    participant Clock_Sysvar as Clock Sysvar
+
+    User->>AMM_Program: Calls Swap instruction (e.g., SwapBaseIn: pool ID, amount_in, min_amount_out)
+    activate AMM_Program
+
+    AMM_Program->>Amm_Info_Account: Load AMM pool state (status, reserves, fees, OpenBook market details, etc.)
+    AMM_Program->>OpenOrders_Account: Load OpenOrders state (for effective reserve calculation & order placement)
+    AMM_Program->>TargetOrders_Account: Load TargetOrders state (potentially, though less direct impact on pure swaps)
+    AMM_Program->>Base_Token_Vault: Read current base token vault balance
+    AMM_Program->>Quote_Token_Vault: Read current quote token vault balance
+
+    %% Determine Swap Path & Calculate Amounts
+    AMM_Program->>AMM_Program: Determine if swap is Coin2PC or PC2Coin
+    AMM_Program->>AMM_Program: Calculate effective pool reserves (vaults + OpenBook orders if applicable for pricing)
+
+    alt Swap against internal AMM liquidity primarily
+        AMM_Program->>AMM_Program: Calculate swap output amount using constant product (x*y=k), deduct fees
+        AMM_Program->>AMM_Program: Check slippage against min_amount_out
+
+        %% Token Transfer: User to AMM Vault (Input Token)
+        Note over User_Source_Token_Account, Base_Token_Vault: Assume Source is Base, Dest is Quote for this example
+        AMM_Program->>SPL_Token_Program: Transfer Input Tokens from User_Source_Token_Account to appropriate AMM Vault (e.g., Base_Token_Vault)
+        activate SPL_Token_Program
+        SPL_Token_Program-->>User_Source_Token_Account: Debit Input Tokens
+        SPL_Token_Program-->>Base_Token_Vault: Credit Input Tokens
+        deactivate SPL_Token_Program
+
+        %% Token Transfer: AMM Vault to User (Output Token)
+        AMM_Program->>SPL_Token_Program: Transfer Output Tokens from appropriate AMM Vault (e.g., Quote_Token_Vault) to User_Destination_Token_Account
+        activate SPL_Token_Program
+        SPL_Token_Program-->>Quote_Token_Vault: Debit Output Tokens
+        SPL_Token_Program-->>User_Destination_Token_Account: Credit Output Tokens
+        deactivate SPL_Token_Program
+
+    else Swap involves interaction with OpenBook DEX (more complex, simplified here)
+        %% This path is highly complex and often part of MonitorStep; Swap instruction might simplify this.
+        %% For a direct swap that *could* use OpenBook, the AMM might:
+        AMM_Program->>OB_Market_Accounts: Read OpenBook order book (Bids, Asks)
+        AMM_Program->>AMM_Program: Determine if matching on OpenBook offers better price or is necessary
+
+        %% Example: AMM takes liquidity from OpenBook or places an order that gets filled
+        AMM_Program->>OpenBook_DEX_Program: Potentially cancel some of its own orders on OpenBook
+        AMM_Program->>OpenBook_DEX_Program: Place order(s) on OpenBook market (via OpenOrders_Account, OB_Market_Accounts)
+        activate OpenBook_DEX_Program
+        OpenBook_DEX_Program-->>OB_Market_Accounts: Order matched / filled
+        deactivate OpenBook_DEX_Program
+
+        AMM_Program->>OpenBook_DEX_Program: Settle funds from OpenBook (via OpenOrders_Account, OB_Market_Accounts) to AMM Vaults
+        activate OpenBook_DEX_Program
+        OpenBook_DEX_Program-->>Base_Token_Vault: +/- Base Tokens
+        OpenBook_DEX_Program-->>Quote_Token_Vault: +/- Quote Tokens
+        deactivate OpenBook_DEX_Program
+
+        %% Then proceeds with transfers to/from user based on settled amounts
+        AMM_Program->>SPL_Token_Program: Transfer Input Tokens from User_Source_Token_Account to AMM Vault
+        AMM_Program->>SPL_Token_Program: Transfer Output Tokens from AMM Vault to User_Destination_Token_Account
+    end
+
+    %% Update AMM State
+    AMM_Program->>Amm_Info_Account: Update statistical data (swap volumes, accumulated fees in state_data)
+    AMM_Program->>Clock_Sysvar: Read current epoch
+    AMM_Program->>Amm_Info_Account: Update recent_epoch
+
+    AMM_Program-->>User: Swap Successful, Tokens Received
+    deactivate AMM_Program
+
+Note right of AMM_Program: The actual interaction with OpenBook for a single swap can be very complex, involving the AMM's order book management strategy (MonitorStep). A direct Swap instruction might prioritize internal AMM liquidity or a simplified interaction with OpenBook. This diagram shows a high-level view.

@@ -1,0 +1,85 @@
+sequenceDiagram
+    participant User
+    participant AMM_Program as Raydium AMM Program
+    participant SPL_Token_Program as SPL Token Program
+    participant OpenBook_DEX_Program as OpenBook DEX Program
+    participant Amm_Info_Account as AMM Info Account (Existing)
+    participant User_LP_Token_Account as User LP Token Account
+    participant User_Base_Token_Account as User Base Token Account
+    participant User_Quote_Token_Account as User Quote Token Account
+    participant Base_Token_Vault as Base Token Vault (Existing)
+    participant Quote_Token_Vault as Quote Token Vault (Existing)
+    participant LP_Token_Mint as LP Token Mint (Existing)
+    participant OpenOrders_Account as OpenOrders Account (Existing)
+    participant TargetOrders_Account as TargetOrders Account (Existing)
+    participant Market_Accounts as OpenBook Market Accounts (Bids, Asks, EventQ, etc.)
+    participant Clock_Sysvar as Clock Sysvar
+
+    User->>AMM_Program: Calls Withdraw instruction (pool ID, amount of LP tokens to burn)
+    activate AMM_Program
+
+    AMM_Program->>Amm_Info_Account: Load AMM pool state (status, reserves, lp_supply, fees, etc.)
+    AMM_Program->>OpenOrders_Account: Load OpenOrders state
+    AMM_Program->>TargetOrders_Account: Load TargetOrders state
+    AMM_Program->>Base_Token_Vault: Read current base token vault balance
+    AMM_Program->>Quote_Token_Vault: Read current quote token vault balance
+    AMM_Program->>LP_Token_Mint: Read current LP token supply
+    AMM_Program->>User_LP_Token_Account: Read user's LP token balance
+
+    %% Optional: Cancel orders on OpenBook if direct vault liquidity is insufficient
+    alt Vault liquidity potentially insufficient OR AMM strategy requires rebalancing
+        AMM_Program->>OpenBook_DEX_Program: Cancel some AMM orders on OpenBook (via OpenOrders_Account, Market_Accounts)
+        activate OpenBook_DEX_Program
+        OpenBook_DEX_Program-->>AMM_Program: Orders Cancelled
+        deactivate OpenBook_DEX_Program
+
+        AMM_Program->>OpenBook_DEX_Program: Settle funds from OpenOrders_Account to AMM Vaults (Base_Token_Vault, Quote_Token_Vault)
+        activate OpenBook_DEX_Program
+        OpenBook_DEX_Program-->>Base_Token_Vault: Credit Base Tokens
+        OpenBook_DEX_Program-->>Quote_Token_Vault: Credit Quote Tokens
+        deactivate OpenBook_DEX_Program
+
+        AMM_Program->>Base_Token_Vault: Re-read base token vault balance
+        AMM_Program->>Quote_Token_Vault: Re-read quote token vault balance
+    end
+
+    %% PnL Calculation (Simplified)
+    AMM_Program->>AMM_Program: Calculate effective pool reserves (vaults + remaining OpenBook orders)
+    AMM_Program->>AMM_Program: Calculate and account for pending PnL (updates AmmInfo.state_data, TargetOrders.calc_pnl_x/y)
+
+    %% Determine Token Amounts to Return
+    AMM_Program->>AMM_Program: Calculate amounts of Base and Quote tokens to return based on LP tokens burned and effective reserves
+
+    %% Burn User's LP Tokens
+    AMM_Program->>SPL_Token_Program: Burn LP Tokens from User_LP_Token_Account
+    activate SPL_Token_Program
+    SPL_Token_Program-->>User_LP_Token_Account: Debit LP Tokens
+    SPL_Token_Program-->>LP_Token_Mint: Credit (Burn to supply) LP Tokens
+    deactivate SPL_Token_Program
+
+    %% Token Transfers from Vaults to User
+    AMM_Program->>SPL_Token_Program: Transfer Base Tokens from Base_Token_Vault to User_Base_Token_Account
+    activate SPL_Token_Program
+    SPL_Token_Program-->>Base_Token_Vault: Debit Base Tokens
+    SPL_Token_Program-->>User_Base_Token_Account: Credit Base Tokens
+    deactivate SPL_Token_Program
+
+    AMM_Program->>SPL_Token_Program: Transfer Quote Tokens from Quote_Token_Vault to User_Quote_Token_Account
+    activate SPL_Token_Program
+    SPL_Token_Program-->>Quote_Token_Vault: Debit Quote Tokens
+    SPL_Token_Program-->>User_Quote_Token_Account: Credit Quote Tokens
+    deactivate SPL_Token_Program
+
+    %% Update AMM State
+    AMM_Program->>Amm_Info_Account: Update total LP supply (lp_amount)
+    AMM_Program->>TargetOrders_Account: Update calc_pnl_x, calc_pnl_y with new liquidity
+    AMM_Program->>Clock_Sysvar: Read current epoch
+    AMM_Program->>Amm_Info_Account: Update recent_epoch
+
+    %% Optional: If AMM strategy involves rebalancing remaining orders on OpenBook
+    alt AMM rebalances remaining orders
+        AMM_Program->>OpenBook_DEX_Program: (Potentially) Cancel/Place new/updated orders based on new liquidity state
+    end
+
+    AMM_Program-->>User: Liquidity Withdrawn Successfully, Tokens Received
+    deactivate AMM_Program
