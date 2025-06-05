@@ -23,24 +23,24 @@ This flow describes how a new liquidity pool is created for a pair of tokens.
 **Accounts Created/Initialized:**
 *   **AMM Info Account (`AmmInfo`):** Stores all parameters and state for the new pool.
 *   **LP Token Mint Account:** A new SPL token mint for the Liquidity Provider (LP) tokens specific to this pool.
-*   **Coin Token Vault:** An SPL token account (owned by AMM PDA) to hold the Coin tokens.
-*   **PC Token Vault:** An SPL token account (owned by AMM PDA) to hold the PC tokens.
-*   **OpenOrders Account:** An account for the AMM on the associated OpenBook market, allowing the AMM to place orders.
-*   **TargetOrders Account:** Stores the AMM's planned limit orders for the OpenBook DEX.
-*   **(Potentially) Associated Token Accounts (ATAs):** For the AMM's vaults if they don't already exist (though typically PDAs are used directly). User's LP token ATA is also created.
+*   **Coin Token Vault:** An SPL token account (owned by AMM Authority PDA) to hold the Coin tokens.
+*   **PC Token Vault:** An SPL token account (owned by AMM Authority PDA) to hold the PC tokens.
+*   **OpenOrders Account:** An account for the AMM on the associated OpenBook market, allowing the AMM to place orders, controlled by the AMM Authority PDA.
+*   **TargetOrders Account:** Stores the AMM's planned limit orders for the OpenBook DEX, controlled by the AMM Authority PDA.
+*   **(Potentially) Associated Token Accounts (ATAs):** User's LP token ATA is also created if it doesn't exist.
 
 **Key Operations (primarily via `Initialize2` instruction):**
-1.  **Fee Payment:** The user pays a one-time fee (if configured in `AmmConfig`) for creating the pool.
-2.  **PDA Generation:** Program Derived Addresses (PDAs) are determined for the AMM authority, token vaults, LP mint, AMM info account, OpenOrders account, and TargetOrders account.
+1.  **Fee Payment:** The user pays a one-time fee (if configured in the global `AmmConfig` account) for creating the pool.
+2.  **PDA Generation:** Program Derived Addresses (PDAs) are determined for the AMM authority, token vaults, LP mint, AMM info account, OpenOrders account, and TargetOrders account based on the Raydium AMM program ID and specific seeds.
 3.  **Account Creation & Initialization:**
-    *   The `AmmInfo`, `TargetOrders`, LP Mint, Coin Vault, and PC Vault accounts are created and initialized with provided parameters (nonce, open time, decimals, lot sizes from market, fee settings).
-    *   The OpenOrders account is created and initialized on the OpenBook DEX market.
+    *   The `AmmInfo`, `TargetOrders`, LP Mint, Coin Vault, and PC Vault accounts are created (space allocated via System Program) and initialized with provided parameters (nonce, open time, token decimals, lot sizes derived from the OpenBook market, fee settings from `AmmInfo` defaults).
+    *   The OpenOrders account is created and initialized on the OpenBook DEX market, with the AMM Authority PDA as its owner.
 4.  **Initial Liquidity Deposit:**
-    *   The creator's specified amounts of Coin and PC tokens are transferred from their accounts into the newly created Coin and PC vaults.
+    *   The creator's specified amounts of Coin and PC tokens are transferred from their source token accounts into the newly created Coin and PC Token Vaults respectively.
 5.  **LP Token Minting:**
-    *   Based on the initial liquidity deposited, a corresponding amount of LP tokens is minted to the creator's LP token account. The amount is typically calculated based on the geometric mean of the initial token amounts, minus a small initial lock-up amount.
-6.  **State Update:** The `AmmInfo` account is updated to reflect the new pool's parameters, including its status (e.g., `WaitingTrade` or `SwapOnly` depending on `open_time`).
-7.  The `TargetOrders` account is initialized with the initial liquidity composition (`calc_pnl_x`, `calc_pnl_y`).
+    *   Based on the initial liquidity deposited, a corresponding amount of LP tokens is minted to the creator's LP token account. The amount is typically calculated using the geometric mean of the initial token amounts (`sqrt(coin_amount * pc_amount)`), adjusted by subtracting a small fixed amount (`10^lp_decimals`) to prevent certain exploits.
+6.  **State Update:** The `AmmInfo` account is populated with all pool parameters. Its status is set (e.g., `WaitingTrade` or `SwapOnly` depending on `open_time`).
+7.  The `TargetOrders` account is initialized, with `calc_pnl_x` and `calc_pnl_y` set to the normalized values of the initial PC and Coin liquidity, establishing the baseline for future PnL calculations.
 
 **Flow Diagram:**
 ```mermaid
@@ -155,29 +155,30 @@ This flow describes how a user adds liquidity to an existing pool and receives L
 *   Pool Identifier (e.g., AMM Info account public key).
 *   Maximum amount of Coin token the user is willing to deposit.
 *   Maximum amount of PC token the user is willing to deposit.
-*   `base_side`: Indicates which token amount (`max_coin_amount` or `max_pc_amount`) is the primary reference for calculating the deposit ratio.
-*   (Optional) `other_amount_min`: Minimum amount of the non-base token the user expects to deposit, for slippage control.
+*   `base_side`: Indicates which token amount (`max_coin_amount` or `max_pc_amount`) is the primary reference for calculating the deposit ratio. `0` for Coin as base, `1` for PC as base.
+*   (Optional) `other_amount_min`: Minimum amount of the non-base token the user expects to deposit, providing slippage control.
 *   User's wallet and source token accounts for Coin and PC tokens.
 *   User's destination LP token account.
 
 **LP Tokens Minted:**
-*   The number of LP tokens minted is proportional to the user's share of the total liquidity after their deposit.
-*   The calculation is based on the current ratio of tokens in the pool (effective reserves, considering orders on OpenBook) and the amount of tokens the user deposits. The AMM tries to maintain the existing price ratio.
-*   If `base_side` is Coin, the amount of PC token deposited is `max_coin_amount * current_pc_reserve / current_coin_reserve`. If this exceeds `max_pc_amount`, the transaction may fail or be adjusted. A similar calculation applies if `base_side` is PC.
+*   The number of LP tokens minted is proportional to the user's share of the total effective liquidity after their deposit.
+*   The calculation is based on the current ratio of tokens in the pool (effective reserves, considering tokens in vaults and potentially on OpenBook) and the amount of tokens the user deposits. The AMM tries to maintain the existing price ratio.
+*   If `base_side` is Coin, the amount of PC token to deposit is calculated proportionally: `pc_to_deposit = max_coin_amount * current_pc_reserve / current_coin_reserve` (using ceiling rounding). If this calculated `pc_to_deposit` exceeds the user's `max_pc_amount`, the transaction may fail due to slippage. A similar calculation applies if `base_side` is PC.
 
 **How Liquidity is Added:**
-1.  The user's Coin and PC tokens are transferred from their accounts into the AMM's Coin and PC vaults, respectively.
+1.  The user's Coin and PC tokens (actual amounts determined by the AMM based on pool ratio and user inputs) are transferred from their accounts into the AMM's Coin and PC vaults.
 2.  The `AmmInfo` state (specifically `lp_amount`) is updated to reflect the newly minted LP tokens.
-3.  The `TargetOrders` account (`calc_pnl_x`, `calc_pnl_y`) is updated to reflect the new total liquidity, which influences future order calculations for OpenBook.
-4.  Profit and Loss (PnL) from AMM operations might be calculated and factored in before determining the deposit ratio and LP amount.
+3.  The PnL baseline in the `TargetOrders` account (`calc_pnl_x`, `calc_pnl_y`) is updated to reflect the new total liquidity, which influences future order calculations for OpenBook and PnL calculations.
+4.  Profit and Loss (PnL) that has accrued in the pool since the last PnL update is calculated and set aside before determining the deposit ratio and LP amount for the new depositor. This ensures fairness to existing LPs.
 
 **Key Operations (primarily via `Deposit` instruction):**
 1.  **Load State:** The current state of the AMM pool (`AmmInfo`, `TargetOrders`, vault balances, OpenBook `OpenOrders` state) is loaded.
-2.  **Calculate PnL:** Pending PnL for the pool might be calculated and accounted for.
-3.  **Determine Deposit Amounts:** Based on the current pool ratio (considering tokens in vaults and on OpenBook) and the user's `max_coin_amount`, `max_pc_amount`, and `base_side`, the actual amounts of Coin and PC tokens to be deposited are determined. Slippage checks against `other_amount_min` are performed if provided.
-4.  **Token Transfer:** The calculated amounts of Coin and PC tokens are transferred from the user's accounts to the AMM's vaults.
-5.  **Mint LP Tokens:** A corresponding amount of LP tokens is minted to the user's LP token account.
-6.  **Update State:** `AmmInfo` (`lp_amount`) and `TargetOrders` (`calc_pnl_x`, `calc_pnl_y` reflecting the new liquidity) are updated.
+2.  **Calculate PnL:** Pending PnL for the pool is calculated using `Processor::calc_take_pnl`. This adjusts the effective reserves used for deposit calculations and updates PnL tracking fields in `AmmInfo.state_data` and `TargetOrders`.
+3.  **Determine Deposit Amounts:** Based on the PnL-adjusted current pool ratio and the user's `max_coin_amount`, `max_pc_amount`, and `base_side`, the actual amounts of Coin (`deduct_coin_amount`) and PC tokens (`deduct_pc_amount`) to be deposited are determined using `InvariantToken::exchange_coin_to_pc` or `exchange_pc_to_coin` (with ceiling rounding for the second token). Slippage checks against `other_amount_min` and `max_pc_amount`/`max_coin_amount` are performed.
+4.  **Calculate LP Tokens to Mint:** Using `InvariantPool::exchange_token_to_pool` (with floor rounding), the amount of LP tokens (`mint_lp_amount`) to be minted is calculated based on the `deduct_coin_amount` (or `deduct_pc_amount`) relative to the PnL-adjusted total effective reserves.
+5.  **Token Transfer:** The `deduct_coin_amount` and `deduct_pc_amount` are transferred from the user's accounts to the AMM's vaults.
+6.  **Mint LP Tokens:** `mint_lp_amount` of LP tokens is minted to the user's LP token account.
+7.  **Update State:** `AmmInfo.lp_amount` is increased. `TargetOrders.calc_pnl_x` and `calc_pnl_y` are updated with the newly added liquidity (normalized and adjusted for the PnL that was set aside). `AmmInfo.recent_epoch` is updated.
 
 **Flow Diagram:**
 ```mermaid
@@ -265,25 +266,26 @@ This flow describes how a user burns their LP tokens to withdraw their share of 
 *   User's destination token accounts for Coin and PC tokens.
 
 **Calculation of Tokens Returned:**
-*   The amount of Coin and PC tokens returned is proportional to the user's share of the total liquidity, represented by the LP tokens they burn.
-*   Calculation: `coin_to_return = (LP_tokens_to_burn / total_LP_supply) * total_coin_in_pool` (similarly for PC tokens). The "total_in_pool" considers tokens in vaults and on OpenBook.
+*   The amount of Coin and PC tokens returned is proportional to the user's share of the total effective liquidity, represented by the LP tokens they burn.
+*   Calculation: `coin_to_return = (LP_tokens_to_burn / total_LP_supply) * total_effective_coin_in_pool` (similarly for PC tokens). The "total_effective_coin_in_pool" considers tokens in vaults and on OpenBook, adjusted for PnL.
 
 **How Liquidity is Removed:**
-1.  The AMM may first cancel some of its orders on OpenBook to free up liquidity if the amounts in the vaults are insufficient.
-2.  Funds are settled from OpenBook's DEX vaults to the AMM's vaults if necessary.
-3.  The calculated amounts of Coin and PC tokens are transferred from the AMM's vaults to the user's token accounts.
-4.  The user's LP tokens are burned.
-5.  The `AmmInfo` state (`lp_amount`) and `TargetOrders` (`calc_pnl_x`, `calc_pnl_y`) are updated to reflect the reduced liquidity.
+1.  If the AMM operates with an order book, it first cancels all its orders on OpenBook to consolidate liquidity.
+2.  Funds are settled from OpenBook's DEX vaults (via the AMM's OpenOrders account) to the AMM's main token vaults.
+3.  Accrued PnL is calculated and set aside (unless the pool is in WithdrawOnly mode).
+4.  The amounts of Coin and PC tokens corresponding to the user's burned LP tokens are calculated based on the PnL-adjusted effective reserves.
+5.  These token amounts are transferred from the AMM's vaults to the user's token accounts.
+6.  The user's LP tokens are burned.
+7.  The `AmmInfo` state (`lp_amount`) and `TargetOrders` PnL baseline (`calc_pnl_x`, `calc_pnl_y`) are updated.
 
 **Key Operations (primarily via `Withdraw` instruction):**
 1.  **Load State:** Current state of the AMM pool and OpenBook orders is loaded.
-2.  **Order Cancellation (if needed):** If vault balances are insufficient, the AMM cancels some of its least competitive orders on OpenBook.
-3.  **Settle Funds (if needed):** The AMM settles any released funds from its OpenOrders account on OpenBook back to its main token vaults.
-4.  **Calculate PnL:** Pending PnL might be calculated.
-5.  **Determine Withdrawal Amounts:** Based on the LP tokens to burn and the total effective liquidity (tokens in vaults + on OpenBook), the amounts of Coin and PC tokens to be returned are calculated. Slippage checks against `min_coin_amount` and `min_pc_amount` are performed if provided.
-6.  **Token Transfer:** The calculated amounts of Coin and PC tokens are transferred from the AMM's vaults to the user's accounts.
-7.  **Burn LP Tokens:** The user's specified amount of LP tokens is burned from their account.
-8.  **Update State:** `AmmInfo` (`lp_amount`) and `TargetOrders` (`calc_pnl_x`, `calc_pnl_y`) are updated.
+2.  **Order Cancellation & Settlement (if applicable):** If the pool interacts with OpenBook, all AMM orders are cancelled (`Processor::do_cancel_amm_orders`), and funds are settled back to AMM vaults (`Invokers::invoke_dex_settle_funds`).
+3.  **Calculate PnL:** Pending PnL is calculated via `Processor::calc_take_pnl` (unless in `WithdrawOnly` status), adjusting effective reserves and updating PnL tracking state.
+4.  **Determine Withdrawal Amounts:** Based on the LP tokens to burn (`withdraw.amount`) and the PnL-adjusted total effective liquidity, the amounts of Coin and PC tokens to be returned (`coin_amount`, `pc_amount`) are calculated using `InvariantPool::exchange_pool_to_token` (with floor rounding). Slippage checks against `min_coin_amount` and `min_pc_amount` are performed if provided.
+5.  **Token Transfer:** The calculated `coin_amount` and `pc_amount` are transferred from the AMM's vaults to the user's accounts.
+6.  **Burn LP Tokens:** The user's specified `withdraw.amount` of LP tokens is burned from their account.
+7.  **Update State:** `AmmInfo.lp_amount` is decreased. `TargetOrders.calc_pnl_x` and `calc_pnl_y` are updated by subtracting the normalized withdrawn amounts and PnL adjustments. `AmmInfo.recent_epoch` is updated.
 
 **Flow Diagram:**
 ```mermaid
@@ -389,32 +391,35 @@ This flow describes how a user exchanges one token for another using the AMM.
 
 **Swap Amount Calculation:**
 *   The core calculation uses the constant product formula (`x * y = k`).
-*   If swapping Token A for Token B: `amount_out_B = (pool_B_reserve * amount_in_A) / (pool_A_reserve + amount_in_A)`. (This is a simplified version; fees are also factored in).
-*   The actual reserves considered (`pool_A_reserve`, `pool_B_reserve`) are the effective amounts in the AMM, including liquidity in vaults and potentially on OpenBook.
-*   A swap fee is deducted from the input amount before calculating the output amount.
-*   If the calculated `amount_out` is less than `minimum_amount_out`, the transaction fails due to slippage.
+*   If swapping Token A for Token B: `amount_out_B = (pool_B_reserve * amount_in_A_after_fees) / (pool_A_reserve + amount_in_A_after_fees)`.
+*   The actual reserves considered (`pool_A_reserve`, `pool_B_reserve`) are the effective amounts in the AMM, including liquidity in vaults and potentially on OpenBook, but *not* adjusted for pending PnL during the swap itself.
+*   A swap fee (e.g., 0.25%) is deducted from the `amount_in` before calculating the output amount. The fee calculation uses ceiling rounding.
+*   If the calculated `amount_out` is less than `minimum_amount_out` specified by the user, the transaction fails due to slippage.
 
 **Interaction with Liquidity Sources:**
-*   **Internal AMM Pool:** The swap can occur directly against the liquidity held in the AMM's vaults.
-*   **OpenBook DEX:** Raydium's AMM is designed to also interact with its orders placed on the OpenBook DEX. If a better price can be achieved by matching against its own (or others') orders on OpenBook, part or all of the swap might be routed there. This typically involves:
-    1.  Cancelling existing AMM orders on OpenBook that might interfere or are less optimal.
-    2.  Potentially placing a new order (or market order) on OpenBook to execute the swap.
-    3.  Settling the filled order from OpenBook back to AMM vaults.
-    This is more complex and often managed by the AMM's internal state machine (`MonitorStep`). For simpler client-side swaps (`SwapBaseIn`/`SwapBaseOut`), the interaction might be primarily with the AMM's direct liquidity, but the AMM's overall state (including OpenBook orders) influences the price.
+*   **Internal AMM Pool:** The swap primarily occurs against the liquidity held in the AMM's vaults.
+*   **OpenBook DEX (Indirect Interaction during Swaps):**
+    *   Before executing the swap against its internal pool, the AMM cancels its own resting limit orders on the OpenBook DEX for the side that would be adversely affected by the swap (e.g., cancels its bids if user is selling Coin, or asks if user is buying Coin). This prevents the user's swap from trading against the AMM's own stale orders at potentially worse prices for the AMM.
+    *   If the AMM's vaults do not have enough of the output token (because much of it is locked in its OpenOrders account on the DEX), it will attempt to settle funds from its OpenOrders account back to its vaults.
+    *   The swap itself, as processed by `SwapBaseIn` or `SwapBaseOut`, primarily uses the AMM's (now consolidated) vault liquidity. The AMM's `MonitorStep` instruction is responsible for later re-placing orders on OpenBook based on the new pool balances.
 
 **Key Operations (primarily via `SwapBaseIn` or `SwapBaseOut` instructions):**
-1.  **Load State:** Current state of the AMM pool (`AmmInfo`, vault balances, potentially OpenBook `OpenOrders` for effective reserve calculation).
+1.  **Load State:** Current state of the AMM pool (`AmmInfo`, vault balances, OpenBook `OpenOrders` if applicable).
 2.  **Determine Swap Direction:** Based on input and output token mints.
-3.  **Calculate Effective Reserves:** Determine the current effective amounts of Coin and PC tokens available for the swap.
-4.  **Calculate Swap Output:** Using the constant product formula (or a derived formula) and current effective reserves, calculate the amount of output token the user will receive for their input amount, after deducting fees.
-5.  **Slippage Check:** Verify if the calculated output amount is greater than or equal to `minimum_amount_out`.
-6.  **Token Transfers:**
+3.  **Calculate Effective Reserves:** Uses `Calculator::calc_total_without_take_pnl` (or its `_no_orderbook` variant) to determine current effective PC and Coin amounts.
+4.  **Fee Calculation:** `swap_fee` is calculated on `amount_in` using `amm.fees.swap_fee_numerator/denominator` and ceiling rounding. `swap_in_after_deduct_fee = amount_in - swap_fee`.
+5.  **Calculate Swap Output/Input:**
+    *   For `SwapBaseIn`: `swap_amount_out = Calculator::swap_token_amount_base_in(swap_in_after_deduct_fee, ...)` using floor division.
+    *   For `SwapBaseOut`: `swap_in_before_add_fee = Calculator::swap_token_amount_base_out(amount_out, ...)` using ceiling division. Then `swap_in_after_add_fee` is calculated to include fees, also using ceiling division.
+6.  **Slippage & Validity Checks:** Ensure calculated amounts meet user's `minimum_amount_out` or `max_amount_in`, and that amounts are non-zero and do not exceed pool reserves.
+7.  **OpenBook Order Management (if applicable):** Cancel relevant AMM orders on OpenBook. Settle funds if vault balances for output token are insufficient.
+8.  **Token Transfers:**
     *   Transfer the input token amount from the user's source account to the corresponding AMM vault.
     *   Transfer the calculated output token amount from the corresponding AMM vault to the user's destination account.
-7.  **Update State:**
-    *   The `AmmInfo`'s `state_data` (e.g., `swap_coin_in_amount`, `swap_pc_out_amount`, `swap_acc_coin_fee`) is updated to record swap volume and fees.
-    *   The `AmmInfo`'s `recent_epoch` is updated.
-    *   (Note: `calc_pnl_x` and `calc_pnl_y` in `TargetOrders` are *not* directly updated by swaps; they change with liquidity deposits/withdrawals or when PnL is explicitly taken. Swaps change the *ratio* of reserves, which is reflected in `total_pc_without_take_pnl` and `total_coin_without_take_pnl` used in subsequent calculations.)
+9.  **Update State:**
+    *   The `AmmInfo.state_data` (e.g., `swap_coin_in_amount`, `swap_pc_out_amount`, `swap_acc_coin_fee`) is updated to record swap volume and fees.
+    *   `AmmInfo.recent_epoch` is updated.
+    *   The PnL baseline (`TargetOrders.calc_pnl_x/y`) is *not* directly updated by swaps; accumulated swap fees contribute to PnL over time, which is then processed during deposits, withdrawals, or `MonitorStep`.
 
 **Flow Diagram:**
 ```mermaid

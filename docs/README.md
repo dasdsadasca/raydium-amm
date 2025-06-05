@@ -2,7 +2,7 @@
 
 Welcome to the official documentation for the Raydium Automated Market Maker (AMM) protocol. This documentation aims to provide a comprehensive understanding of Raydium's architecture, smart contract components, user interaction flows, and key terminology.
 
-Whether you are a developer looking to integrate with Raydium, a security researcher, or a user seeking to understand its inner workings, these documents should provide valuable insights.
+Whether you are a developer looking to integrate with Raydium, a security researcher, or a user seeking to understand its inner workings, these documents are intended to provide valuable insights.
 
 ## Documentation Structure
 
